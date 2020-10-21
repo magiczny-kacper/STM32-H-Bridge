@@ -17,15 +17,16 @@
   ******************************************************************************
   */
 /* USER CODE END Header */
-
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "arm_math.h"
 #include "stdio.h"
 #include "stdlib.h"
 #include "string.h"
+#include "pid.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -36,7 +37,8 @@
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 #define N 8
-
+#define MAX_SPEED 420.0
+#define RAMP_STEP 0.002
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -49,72 +51,49 @@ ADC_HandleTypeDef hadc1;
 DMA_HandleTypeDef hdma_adc1;
 
 TIM_HandleTypeDef htim1;
+TIM_HandleTypeDef htim3;
 TIM_HandleTypeDef htim4;
 
+UART_HandleTypeDef huart2;
+DMA_HandleTypeDef hdma_usart2_tx;
+
 /* USER CODE BEGIN PV */
-uint16_t adc_values[2];
-uint32_t values[8], avg_values[10];
-uint32_t movingAverage, movingAverageSum;
-uint32_t zero_current;
-int8_t rev = 1;
-uint8_t cycle = 0;
-uint8_t samples = 0;
-uint32_t x = 0;
-uint8_t data[16];
-uint8_t state = 0, last_state = 0;
-float ref;
-float last_ref = 0;
-//uint32_t m_nStart;               //DEBUG Stopwatch start cycle counter value
-//uint32_t m_nStop;
-float ref = 0;
+volatile uint32_t 		raw_adc_values[2];
+volatile uint32_t 		values[N];
+volatile uint32_t 		average_values[10];
+volatile uint16_t 		position_diff;
+volatile uint32_t 		movingAverage;
+volatile uint32_t 		movingAverageSum;
+volatile uint32_t 		zero_current;
+volatile int16_t 		speed_raw;
+volatile int8_t 		rev = 1;
+volatile uint8_t 		cycle = 0;
+volatile uint8_t 		samples = 0;
+uint8_t 				cyclespeed = 0;
+uint8_t 				run = 0;
+uint8_t 				control_loop = 2;
+uint8_t 				last_control_loop = 0;
 
-struct PID_Data{
-	uint8_t run;
-	float Kp;
-	float Ti;
-	float Td;
-	float Ts;
-	float Kb;
-	float output_rate;
+float ref_normalized;
+float ref_ramp;
+float speed;
 
-	float P;
-	float I;
-	float D;
 
-	float reference;
-	float input;
-	float input_raw;
-	float error;
-	float error_dz;
-	float last_error;
-	float output_sat;
-	float output;
-	float last_output;
 
-	float input_offset;
-	float output_min;
-	float output_max;
-	float error_deadzone;
-	float antiwindup_correction;
-	float output_offset;
-};
-
-struct PID_Data regulator;
+PID_Data current_regulator;
+PID_Data speed_regulator;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
+static void MX_DMA_Init(void);
 static void MX_ADC1_Init(void);
 static void MX_TIM1_Init(void);
 static void MX_TIM4_Init(void);
-static void MX_DMA_Init(void);
+static void MX_TIM3_Init(void);
+static void MX_USART2_UART_Init(void);
 /* USER CODE BEGIN PFP */
-void PID_Init (struct PID_Data *pid, float P, float I, float D, float Kb, float Ts, float rate, float deadzone, float min, float max, float output_offset, float input_offset);
-void PID_Controller (struct PID_Data *pid);
-void PID_TurnOn (struct PID_Data *pid);
-void PID_TurnOff (struct PID_Data *pid);
-uint8_t PID_Running (struct PID_Data *pid);
 
 /* USER CODE END PFP */
 
@@ -132,7 +111,6 @@ int main(void)
   /* USER CODE BEGIN 1 */
 
   /* USER CODE END 1 */
-  
 
   /* MCU Configuration--------------------------------------------------------*/
 
@@ -152,31 +130,40 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
+  MX_DMA_Init();
   MX_ADC1_Init();
   MX_TIM1_Init();
   MX_TIM4_Init();
-  MX_DMA_Init();
+  MX_TIM3_Init();
+  MX_USART2_UART_Init();
   /* USER CODE BEGIN 2 */
-  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_SET);
   HAL_TIM_PWM_Init(&htim1);
   HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1);
   HAL_TIMEx_PWMN_Start(&htim1, TIM_CHANNEL_1);
-
   TIM1 -> CCR1 = 7200;
+  HAL_TIM_Encoder_Start(&htim3, TIM_CHANNEL_ALL);
 
-  HAL_ADC_Start_DMA(&hadc1, &adc_values[0], 2);
+  HAL_ADC_Start_DMA(&hadc1, &raw_adc_values[0], 2);
 
-  while(cycle < 8);
+  while(cycle < N){
+	  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_SET);
+  }
   cycle = 0;
   movingAverageSum = 0;
-  for(uint8_t i = 0; i < 8; i++){
+  for(uint8_t i = 0; i < N; i++){
   	movingAverageSum += values[i];
   }
-  movingAverage = movingAverageSum >> 3;
+  movingAverage = movingAverageSum / N;
   zero_current = movingAverage;
-  PID_Init(&regulator, 2.0, 8.0, 0.0, 8.0, 0.001, 0.0, 5.0, 720.0, 13680.0, 7200.0, (float)zero_current);
-  regulator.input_raw = (float)zero_current;
-  PID_TurnOn(&regulator);
+
+  PID_Init(&speed_regulator, 3.8, 2.0, 7.0, 0.005, 3.0, -2048.0, 2048.0, 0.0, 0.0);
+
+  PID_Init(&current_regulator, 2.5, 2.0, 7.0, 0.001, 10.0, 720.0, 13680.0, 7200.0, (float)zero_current);
+  current_regulator.input_raw = (float)zero_current;
+
+  PID_TurnOn(&current_regulator);
+  PID_TurnOn(&speed_regulator);
+
   HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_RESET);
   /* USER CODE END 2 */
 
@@ -184,13 +171,14 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-	  if(cycle == 8){
+	  if(cycle >= N){
 		  cycle = 0;
 		  movingAverageSum = 0;
-		  for(uint8_t i = 0; i < 8; i++){
+		  for(uint8_t i = 0; i < N; i++){
 			  movingAverageSum += values[i];
 		  }
-		  avg_values[samples] = movingAverageSum >> 3;
+		  average_values[samples] = movingAverageSum / N;
+		  //arm_rms_f32(&values, N, &average_values[samples]);
 		  samples++;
 	  }
 
@@ -198,10 +186,11 @@ int main(void)
 		  samples = 0;
 		  movingAverageSum = 0;
 		  for(uint8_t i = 0; i < 10; i++){
-		  	movingAverageSum += avg_values[i];
+		  	movingAverageSum += average_values[i];
 		  }
-		  regulator.input_raw = (float)(movingAverageSum / 10);
-
+		  current_regulator.input_raw = ((float)movingAverageSum) / 10.0;
+		  if(run) ref_normalized = ((float)(raw_adc_values[1] >> 1) * rev)/2048.0;
+		  else ref_normalized = 0.0;
 	  }
 
     /* USER CODE END WHILE */
@@ -221,7 +210,8 @@ void SystemClock_Config(void)
   RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
   RCC_PeriphCLKInitTypeDef PeriphClkInit = {0};
 
-  /** Initializes the CPU, AHB and APB busses clocks 
+  /** Initializes the RCC Oscillators according to the specified parameters
+  * in the RCC_OscInitTypeDef structure.
   */
   RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
   RCC_OscInitStruct.HSIState = RCC_HSI_ON;
@@ -234,7 +224,7 @@ void SystemClock_Config(void)
   {
     Error_Handler();
   }
-  /** Initializes the CPU, AHB and APB busses clocks 
+  /** Initializes the CPU, AHB and APB buses clocks
   */
   RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
                               |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
@@ -247,9 +237,10 @@ void SystemClock_Config(void)
   {
     Error_Handler();
   }
-  PeriphClkInit.PeriphClockSelection = RCC_PERIPHCLK_TIM1|RCC_PERIPHCLK_ADC12
-                              |RCC_PERIPHCLK_TIM34;
-  PeriphClkInit.Adc12ClockSelection = RCC_ADC12PLLCLK_DIV4;
+  PeriphClkInit.PeriphClockSelection = RCC_PERIPHCLK_USART2|RCC_PERIPHCLK_TIM1
+                              |RCC_PERIPHCLK_ADC12|RCC_PERIPHCLK_TIM34;
+  PeriphClkInit.Usart2ClockSelection = RCC_USART2CLKSOURCE_PCLK1;
+  PeriphClkInit.Adc12ClockSelection = RCC_ADC12PLLCLK_DIV2;
   PeriphClkInit.Tim1ClockSelection = RCC_TIM1CLK_PLLCLK;
   PeriphClkInit.Tim34ClockSelection = RCC_TIM34CLK_PLLCLK;
   if (HAL_RCCEx_PeriphCLKConfig(&PeriphClkInit) != HAL_OK)
@@ -276,7 +267,7 @@ static void MX_ADC1_Init(void)
   /* USER CODE BEGIN ADC1_Init 1 */
 
   /* USER CODE END ADC1_Init 1 */
-  /** Common config 
+  /** Common config
   */
   hadc1.Instance = ADC1;
   hadc1.Init.ClockPrescaler = ADC_CLOCK_ASYNC_DIV1;
@@ -284,8 +275,8 @@ static void MX_ADC1_Init(void)
   hadc1.Init.ScanConvMode = ADC_SCAN_ENABLE;
   hadc1.Init.ContinuousConvMode = DISABLE;
   hadc1.Init.DiscontinuousConvMode = DISABLE;
-  hadc1.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_NONE;
-  hadc1.Init.ExternalTrigConv = ADC_SOFTWARE_START;
+  hadc1.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_RISING;
+  hadc1.Init.ExternalTrigConv = ADC_EXTERNALTRIGCONV_T4_TRGO;
   hadc1.Init.DataAlign = ADC_DATAALIGN_RIGHT;
   hadc1.Init.NbrOfConversion = 2;
   hadc1.Init.DMAContinuousRequests = ENABLE;
@@ -296,26 +287,26 @@ static void MX_ADC1_Init(void)
   {
     Error_Handler();
   }
-  /** Configure the ADC multi-mode 
+  /** Configure the ADC multi-mode
   */
   multimode.Mode = ADC_MODE_INDEPENDENT;
   if (HAL_ADCEx_MultiModeConfigChannel(&hadc1, &multimode) != HAL_OK)
   {
     Error_Handler();
   }
-  /** Configure Regular Channel 
+  /** Configure Regular Channel
   */
   sConfig.Channel = ADC_CHANNEL_1;
   sConfig.Rank = ADC_REGULAR_RANK_1;
   sConfig.SingleDiff = ADC_SINGLE_ENDED;
-  sConfig.SamplingTime = ADC_SAMPLETIME_19CYCLES_5;
+  sConfig.SamplingTime = ADC_SAMPLETIME_61CYCLES_5;
   sConfig.OffsetNumber = ADC_OFFSET_NONE;
   sConfig.Offset = 0;
   if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
   {
     Error_Handler();
   }
-  /** Configure Regular Channel 
+  /** Configure Regular Channel
   */
   sConfig.Channel = ADC_CHANNEL_2;
   sConfig.Rank = ADC_REGULAR_RANK_2;
@@ -351,7 +342,7 @@ static void MX_TIM1_Init(void)
   htim1.Instance = TIM1;
   htim1.Init.Prescaler = 0;
   htim1.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim1.Init.Period = 14400 - 1;
+  htim1.Init.Period = 14399;
   htim1.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   htim1.Init.RepetitionCounter = 0;
   htim1.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
@@ -380,7 +371,7 @@ static void MX_TIM1_Init(void)
   sBreakDeadTimeConfig.OffStateRunMode = TIM_OSSR_DISABLE;
   sBreakDeadTimeConfig.OffStateIDLEMode = TIM_OSSI_DISABLE;
   sBreakDeadTimeConfig.LockLevel = TIM_LOCKLEVEL_OFF;
-  sBreakDeadTimeConfig.DeadTime = 100;
+  sBreakDeadTimeConfig.DeadTime = 50;
   sBreakDeadTimeConfig.BreakState = TIM_BREAK_DISABLE;
   sBreakDeadTimeConfig.BreakPolarity = TIM_BREAKPOLARITY_HIGH;
   sBreakDeadTimeConfig.BreakFilter = 0;
@@ -396,6 +387,55 @@ static void MX_TIM1_Init(void)
 
   /* USER CODE END TIM1_Init 2 */
   HAL_TIM_MspPostInit(&htim1);
+
+}
+
+/**
+  * @brief TIM3 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM3_Init(void)
+{
+
+  /* USER CODE BEGIN TIM3_Init 0 */
+
+  /* USER CODE END TIM3_Init 0 */
+
+  TIM_Encoder_InitTypeDef sConfig = {0};
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+
+  /* USER CODE BEGIN TIM3_Init 1 */
+
+  /* USER CODE END TIM3_Init 1 */
+  htim3.Instance = TIM3;
+  htim3.Init.Prescaler = 0;
+  htim3.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim3.Init.Period = 65534;
+  htim3.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim3.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  sConfig.EncoderMode = TIM_ENCODERMODE_TI12;
+  sConfig.IC1Polarity = TIM_ICPOLARITY_RISING;
+  sConfig.IC1Selection = TIM_ICSELECTION_DIRECTTI;
+  sConfig.IC1Prescaler = TIM_ICPSC_DIV1;
+  sConfig.IC1Filter = 0;
+  sConfig.IC2Polarity = TIM_ICPOLARITY_RISING;
+  sConfig.IC2Selection = TIM_ICSELECTION_DIRECTTI;
+  sConfig.IC2Prescaler = TIM_ICPSC_DIV1;
+  sConfig.IC2Filter = 0;
+  if (HAL_TIM_Encoder_Init(&htim3, &sConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim3, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM3_Init 2 */
+
+  /* USER CODE END TIM3_Init 2 */
 
 }
 
@@ -420,7 +460,7 @@ static void MX_TIM4_Init(void)
   htim4.Instance = TIM4;
   htim4.Init.Prescaler = 0;
   htim4.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim4.Init.Period = 900 - 1;
+  htim4.Init.Period = 1799;
   htim4.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   htim4.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
   if (HAL_TIM_Base_Init(&htim4) != HAL_OK)
@@ -445,10 +485,45 @@ static void MX_TIM4_Init(void)
 
 }
 
-/** 
+/**
+  * @brief USART2 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_USART2_UART_Init(void)
+{
+
+  /* USER CODE BEGIN USART2_Init 0 */
+
+  /* USER CODE END USART2_Init 0 */
+
+  /* USER CODE BEGIN USART2_Init 1 */
+
+  /* USER CODE END USART2_Init 1 */
+  huart2.Instance = USART2;
+  huart2.Init.BaudRate = 115200;
+  huart2.Init.WordLength = UART_WORDLENGTH_8B;
+  huart2.Init.StopBits = UART_STOPBITS_1;
+  huart2.Init.Parity = UART_PARITY_NONE;
+  huart2.Init.Mode = UART_MODE_TX_RX;
+  huart2.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart2.Init.OverSampling = UART_OVERSAMPLING_16;
+  huart2.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
+  huart2.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
+  if (HAL_UART_Init(&huart2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN USART2_Init 2 */
+
+  /* USER CODE END USART2_Init 2 */
+
+}
+
+/**
   * Enable DMA controller clock
   */
-static void MX_DMA_Init(void) 
+static void MX_DMA_Init(void)
 {
 
   /* DMA controller clock enable */
@@ -458,6 +533,9 @@ static void MX_DMA_Init(void)
   /* DMA1_Channel1_IRQn interrupt configuration */
   HAL_NVIC_SetPriority(DMA1_Channel1_IRQn, 0, 0);
   HAL_NVIC_EnableIRQ(DMA1_Channel1_IRQn);
+  /* DMA1_Channel7_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA1_Channel7_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Channel7_IRQn);
 
 }
 
@@ -474,13 +552,17 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOC_CLK_ENABLE();
   __HAL_RCC_GPIOF_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
+  __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_SET);
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_4|GPIO_PIN_5, GPIO_PIN_RESET);
 
   /*Configure GPIO pin : PC13 */
   GPIO_InitStruct.Pin = GPIO_PIN_13;
-  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
 
@@ -491,173 +573,85 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
+  /*Configure GPIO pins : PB4 PB5 */
+  GPIO_InitStruct.Pin = GPIO_PIN_4|GPIO_PIN_5;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+  /* EXTI interrupt init*/
+  HAL_NVIC_SetPriority(EXTI15_10_IRQn, 1, 0);
+  HAL_NVIC_EnableIRQ(EXTI15_10_IRQn);
+
 }
 
 /* USER CODE BEGIN 4 */
 void HAL_GPIO_EXTI_Callback (uint16_t GPIO_Pin){
-	rev *= -1;
+	//rev *= -1;
+	run = !run;
 }
 
 void HAL_ADC_ConvCpltCallback (ADC_HandleTypeDef* hadc){
-	values[cycle] = adc_values[0];
+	values[cycle] = raw_adc_values[0];
 	cycle++;
-	if(adc_values[1] > 65) ref = ((float)(adc_values[1] >> 1) * rev);
-	else ref = 0.0;
 }
 
 void HAL_SYSTICK_Callback (void){
-	switch (state){
-		case 0:
-			if((last_ref > -1.0 && last_ref < 1.0) && last_ref != ref){
-				//TIM1 -> CCR1 = 7200 + 1000 * rev;
-				HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_RESET);
-				regulator.reference = 1024.0 * rev;
-				state++;
-			}else{
-				regulator.reference = 0.0;
-				HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_SET);
-			}
-			break;
-
-		case 1:
-			x++;
-			if( x >= 50){
-				regulator.reference -= ((1024.0 - ref) / 100.0);
-			}
-			if(x == 150){
-				x = 0;
-				state++;
-				regulator.reference = ref;
-			}
-			break;
-
-		case 2:
-			regulator.reference = ref;
-			if((ref > -1.0 && ref < 1.0) && (last_ref != ref)){
-				HAL_GPIO_WritePin(GPIOA,GPIO_PIN_5,GPIO_PIN_SET);
-				state = 0;
-			}
-			break;
-	}
-	PID_Controller(&regulator);
-	TIM1 -> CCR1 = (uint32_t)regulator.output;
-	last_ref = ref;
-	last_state = state;
+	cyclespeed++;
 	samples = 0;
-}
 
-/**
-  * @brief  Inicjalizacja parametrów regulatora.
-  *
-  * @note   Funckcja służy do inicjalizacji parametrów reguatroa
-  *
-  *
-  *
-  * @param  pid - wskaźnik na strukturę przechowującą wartości związane z regulatorem
-  * @param  P - wzmocnienie członu P
-  * @param  I - wzmocnienie członu I
-  * @param 	D - wzmocnienie członu D
-  * @param  Kb - wzmocnienie członu antiwindup
-  * @param 	Ts - czas próbkowania
-  * @param 	rate - maksymalny przyrost wyjścia
-  * @param 	deadzone - martwa strefa uchybu
-  * @param 	min - minimalna wartośc wyjścia
-  * @param 	max - maksymalna wartość wyjścia
-  * @param 	output_offset - offset wyjścia
-  * @param 	input_offset - offset wejścia
-  *
-  * @retval None
-  */
-void PID_Init (struct PID_Data *pid, float P, float I, float D, float Kb, float Ts, float rate, float deadzone, float min, float max, float output_offset, float input_offset){
-	pid -> Kp = P;
-	pid -> Ti = I;
-	pid -> Td = D;
-	pid -> Ts = Ts;
-	pid -> output_min = min;
-	pid -> output_max = max;
-	pid -> Kb = Kb;
-	pid -> output_offset = output_offset;
-	pid -> input_offset = input_offset;
-	pid -> output_rate = rate;
-	pid -> error_deadzone = deadzone;
-}
-
-void PID_Controller (struct PID_Data *pid){
-	if(pid->run){
-		//Obliczenie uchybu sterowania
-		if(pid->reference == 0){
-			HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_SET);
-			pid->I = 0;
-		}
-		else{
-			HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_RESET);
-		}
-		pid->input = pid->input_raw - pid->input_offset;
-		pid->error_dz = pid->reference - (pid->input);
-
-		if(pid->error_deadzone){
-			if((pid->error_dz < pid->error_deadzone) && (pid->error_dz > -pid->error_deadzone)){
-				pid->error = 0.0;
-			}else pid->error = pid->error_dz;
-		}
-
-		pid->P = pid->Kp * pid->error;
-
-		if(pid->Ti){
-			pid->I += (pid->error + pid->antiwindup_correction)*pid->Ts/pid->Ti;
-		}else{
-			pid->I = 0;
-		}
-
-		if(pid->Td) pid->D = (pid->Td/pid->Ts) * (pid->error_dz - pid->last_error);
-
-		//obliczenie wyjścia
-		pid->output_sat = pid->P + pid->I + pid->D;
-
-		//Ograniczenie szybkości narastania wyjścia
-		if(pid->output_rate){
-			if((pid->output_sat - pid->last_output) > pid->output_rate) pid->output_sat = pid->last_output + pid->output_rate;
-			else if((pid->output_sat - pid->last_output) < -pid->output_rate) pid->output_sat = pid->last_output - pid->output_rate;
-		}
-	}else{
-		pid->output_sat = 0;
+	if(control_loop == 1){
+		current_regulator.reference = ref_ramp * 2048.0;
 	}
-	//Dodanie przesunięcia do wyjścia
-	pid -> output_sat += pid -> output_offset;
 
-	//Saturacja wyjścia, jeśli istnieją ograniczenia
-	if(pid->output_sat < pid->output_min) pid->output = pid->output_min;
-	else if(pid->output_sat > pid->output_max) pid->output = pid->output_max;
-	else pid->output = pid->output_sat;
+	if(cyclespeed == 10){
+		if(ref_normalized - ref_ramp > RAMP_STEP) ref_ramp += RAMP_STEP;
+		else if(ref_normalized - ref_ramp < -RAMP_STEP) ref_ramp -= RAMP_STEP;
+		else ref_ramp = ref_normalized;
+		cyclespeed = 0;
+		speed_raw = htim3.Instance->CNT - position_diff;
+		position_diff = htim3.Instance->CNT;
+		speed = ((float)speed_raw)/8000.0 * 6000.0;
+		speed_regulator.input_raw = speed;
+		if(!ref_ramp) HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_RESET);
+		else{
+			if(!speed_raw){
+				HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_SET);
+				current_regulator.I = 0.0;
+				speed_regulator.I = 0.0;
+			}
+		}
+		if(control_loop == 2){
+			speed_regulator.reference = ref_ramp * MAX_SPEED;
+			current_regulator.reference = speed_regulator.output;
+		}
+		PID_Controller(&speed_regulator);
+	}
 
-	//Zapamiętanie poprzednich wartości
-	pid->antiwindup_correction = pid->Kb * (pid->output - pid->output_sat);
-	pid->last_error = pid->error_dz;
-	pid->last_output = pid->output;
+	PID_Controller(&current_regulator);
 
+	if(control_loop){
+		TIM1 -> CCR1 = (uint32_t)current_regulator.output;
+	}else{
+		TIM1 -> CCR1 = (uint32_t)(7200.0 + ref_ramp * 6480.0);
+	}
+
+	if((control_loop == 0) && (last_control_loop != control_loop)){
+		PID_TurnOff(&speed_regulator);
+		PID_TurnOff(&current_regulator);
+	}else if((control_loop == 1) && (control_loop != last_control_loop)){
+		PID_TurnOn(&current_regulator);
+		PID_TurnOff(&speed_regulator);
+	}else if((control_loop == 2) && (last_control_loop != control_loop)){
+		PID_TurnOn(&speed_regulator);
+		PID_TurnOn(&current_regulator);
+	}
+	last_control_loop = control_loop;
 }
 
-void PID_TurnOn (struct PID_Data *pid){
-	pid->run = 1;
-}
 
-void PID_TurnOff (struct PID_Data *pid){
-	pid->D = 0;
-	pid->I = 0;
-	pid->antiwindup_correction = 0;
-	pid->error = 0;
-	pid->error_dz = 0;
-	pid->last_error = 0;
-	pid->reference = 0;
-	pid->output_sat = 0;
-	pid->output = pid->output_offset;
-	pid->last_output = 0;
-	pid->run = 0;
-}
 
-uint8_t PID_Running (struct PID_Data *pid){
-	return pid->run;
-}
 
 /* USER CODE END 4 */
 
@@ -681,8 +675,8 @@ void Error_Handler(void)
   * @param  line: assert_param error line source number
   * @retval None
   */
-void assert_failed(char *file, uint32_t line)
-{ 
+void assert_failed(uint8_t *file, uint32_t line)
+{
   /* USER CODE BEGIN 6 */
   /* User can add his own implementation to report the file name and line number,
      tex: printf("Wrong parameters value: file %s on line %d\r\n", file, line) */

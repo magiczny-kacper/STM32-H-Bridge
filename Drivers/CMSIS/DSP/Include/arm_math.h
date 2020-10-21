@@ -293,6 +293,8 @@
 #ifndef _ARM_MATH_H
 #define _ARM_MATH_H
 
+#define ARM_MATH_CM4
+
 /* Compiler specific diagnostic adjustment */
 #if   defined ( __CC_ARM )
 

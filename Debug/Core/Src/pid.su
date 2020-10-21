@@ -1,0 +1,5 @@
+pid.c:32:6:PID_Init	0	static
+pid.c:47:6:PID_Controller	0	static
+pid.c:80:6:PID_TurnOn	0	static
+pid.c:84:6:PID_TurnOff	0	static
+pid.c:96:9:PID_Running	0	static

@@ -27,7 +27,11 @@ Core/Src/main.o: ../Core/Src/main.c ../Core/Inc/main.h \
  ../Drivers/STM32F3xx_HAL_Driver/Inc/stm32f3xx_hal_pwr.h \
  ../Drivers/STM32F3xx_HAL_Driver/Inc/stm32f3xx_hal_pwr_ex.h \
  ../Drivers/STM32F3xx_HAL_Driver/Inc/stm32f3xx_hal_tim.h \
- ../Drivers/STM32F3xx_HAL_Driver/Inc/stm32f3xx_hal_tim_ex.h
+ ../Drivers/STM32F3xx_HAL_Driver/Inc/stm32f3xx_hal_tim_ex.h \
+ ../Drivers/STM32F3xx_HAL_Driver/Inc/stm32f3xx_hal_uart.h \
+ ../Drivers/STM32F3xx_HAL_Driver/Inc/stm32f3xx_hal_uart_ex.h \
+ /media/magiczny_kacper/Data/Pulpit\ 13.07.20/Mikrokontrolery/STM32/Cube\ IDE/Mostek\ H/Drivers/CMSIS/DSP/Include/arm_math.h \
+ ../Core/Inc/pid.h
 
 ../Core/Inc/main.h:
 
@@ -88,3 +92,11 @@ Core/Src/main.o: ../Core/Src/main.c ../Core/Inc/main.h \
 ../Drivers/STM32F3xx_HAL_Driver/Inc/stm32f3xx_hal_tim.h:
 
 ../Drivers/STM32F3xx_HAL_Driver/Inc/stm32f3xx_hal_tim_ex.h:
+
+../Drivers/STM32F3xx_HAL_Driver/Inc/stm32f3xx_hal_uart.h:
+
+../Drivers/STM32F3xx_HAL_Driver/Inc/stm32f3xx_hal_uart_ex.h:
+
+/media/magiczny_kacper/Data/Pulpit\ 13.07.20/Mikrokontrolery/STM32/Cube\ IDE/Mostek\ H/Drivers/CMSIS/DSP/Include/arm_math.h:
+
+../Core/Inc/pid.h:
