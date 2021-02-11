@@ -19,6 +19,7 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include "cmsis_os.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
@@ -57,6 +58,20 @@ TIM_HandleTypeDef htim4;
 UART_HandleTypeDef huart2;
 DMA_HandleTypeDef hdma_usart2_tx;
 
+/* Definitions for defaultTask */
+osThreadId_t defaultTaskHandle;
+const osThreadAttr_t defaultTask_attributes = {
+  .name = "defaultTask",
+  .priority = (osPriority_t) osPriorityNormal,
+  .stack_size = 128 * 4
+};
+/* Definitions for PIDTask */
+osThreadId_t PIDTaskHandle;
+const osThreadAttr_t PIDTask_attributes = {
+  .name = "PIDTask",
+  .priority = (osPriority_t) osPriorityRealtime7,
+  .stack_size = 128 * 4
+};
 /* USER CODE BEGIN PV */
 volatile uint32_t 		raw_adc_values[2];
 volatile uint32_t 		values[N];
@@ -80,8 +95,8 @@ float speed;
 
 
 
-PID_Data current_regulator;
-PID_Data speed_regulator;
+PID_t current_regulator;
+PID_t speed_regulator;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -93,6 +108,9 @@ static void MX_TIM1_Init(void);
 static void MX_TIM4_Init(void);
 static void MX_TIM3_Init(void);
 static void MX_USART2_UART_Init(void);
+void StartDefaultTask(void *argument);
+void PidRunner_Entry(void *argument);
+
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -167,6 +185,40 @@ int main(void)
   HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_RESET);
   /* USER CODE END 2 */
 
+  /* Init scheduler */
+  osKernelInitialize();
+
+  /* USER CODE BEGIN RTOS_MUTEX */
+  /* add mutexes, ... */
+  /* USER CODE END RTOS_MUTEX */
+
+  /* USER CODE BEGIN RTOS_SEMAPHORES */
+  /* add semaphores, ... */
+  /* USER CODE END RTOS_SEMAPHORES */
+
+  /* USER CODE BEGIN RTOS_TIMERS */
+  /* start timers, add new ones, ... */
+  /* USER CODE END RTOS_TIMERS */
+
+  /* USER CODE BEGIN RTOS_QUEUES */
+  /* add queues, ... */
+  /* USER CODE END RTOS_QUEUES */
+
+  /* Create the thread(s) */
+  /* creation of defaultTask */
+  defaultTaskHandle = osThreadNew(StartDefaultTask, NULL, &defaultTask_attributes);
+
+  /* creation of PIDTask */
+  PIDTaskHandle = osThreadNew(PidRunner_Entry, NULL, &PIDTask_attributes);
+
+  /* USER CODE BEGIN RTOS_THREADS */
+  /* add threads, ... */
+  /* USER CODE END RTOS_THREADS */
+
+  /* Start scheduler */
+  osKernelStart();
+
+  /* We should never get here as control is now taken by the scheduler */
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
@@ -531,10 +583,10 @@ static void MX_DMA_Init(void)
 
   /* DMA interrupt init */
   /* DMA1_Channel1_IRQn interrupt configuration */
-  HAL_NVIC_SetPriority(DMA1_Channel1_IRQn, 0, 0);
+  HAL_NVIC_SetPriority(DMA1_Channel1_IRQn, 5, 0);
   HAL_NVIC_EnableIRQ(DMA1_Channel1_IRQn);
   /* DMA1_Channel7_IRQn interrupt configuration */
-  HAL_NVIC_SetPriority(DMA1_Channel7_IRQn, 0, 0);
+  HAL_NVIC_SetPriority(DMA1_Channel7_IRQn, 5, 0);
   HAL_NVIC_EnableIRQ(DMA1_Channel7_IRQn);
 
 }
@@ -581,7 +633,7 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
   /* EXTI interrupt init*/
-  HAL_NVIC_SetPriority(EXTI15_10_IRQn, 1, 0);
+  HAL_NVIC_SetPriority(EXTI15_10_IRQn, 6, 0);
   HAL_NVIC_EnableIRQ(EXTI15_10_IRQn);
 
 }
@@ -598,62 +650,122 @@ void HAL_ADC_ConvCpltCallback (ADC_HandleTypeDef* hadc){
 }
 
 void HAL_SYSTICK_Callback (void){
-	cyclespeed++;
-	samples = 0;
 
-	if(control_loop == 1){
-		current_regulator.reference = ref_ramp * 2048.0;
-	}
-
-	if(cyclespeed == 10){
-		if(ref_normalized - ref_ramp > RAMP_STEP) ref_ramp += RAMP_STEP;
-		else if(ref_normalized - ref_ramp < -RAMP_STEP) ref_ramp -= RAMP_STEP;
-		else ref_ramp = ref_normalized;
-		cyclespeed = 0;
-		speed_raw = htim3.Instance->CNT - position_diff;
-		position_diff = htim3.Instance->CNT;
-		speed = ((float)speed_raw)/8000.0 * 6000.0;
-		speed_regulator.input_raw = speed;
-		if(!ref_ramp) HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_RESET);
-		else{
-			if(!speed_raw){
-				HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_SET);
-				current_regulator.I = 0.0;
-				speed_regulator.I = 0.0;
-			}
-		}
-		if(control_loop == 2){
-			speed_regulator.reference = ref_ramp * MAX_SPEED;
-			current_regulator.reference = speed_regulator.output;
-		}
-		PID_Controller(&speed_regulator);
-	}
-
-	PID_Controller(&current_regulator);
-
-	if(control_loop){
-		TIM1 -> CCR1 = (uint32_t)current_regulator.output;
-	}else{
-		TIM1 -> CCR1 = (uint32_t)(7200.0 + ref_ramp * 6480.0);
-	}
-
-	if((control_loop == 0) && (last_control_loop != control_loop)){
-		PID_TurnOff(&speed_regulator);
-		PID_TurnOff(&current_regulator);
-	}else if((control_loop == 1) && (control_loop != last_control_loop)){
-		PID_TurnOn(&current_regulator);
-		PID_TurnOff(&speed_regulator);
-	}else if((control_loop == 2) && (last_control_loop != control_loop)){
-		PID_TurnOn(&speed_regulator);
-		PID_TurnOn(&current_regulator);
-	}
-	last_control_loop = control_loop;
 }
 
 
 
 
 /* USER CODE END 4 */
+
+/* USER CODE BEGIN Header_StartDefaultTask */
+/**
+  * @brief  Function implementing the defaultTask thread.
+  * @param  argument: Not used
+  * @retval None
+  */
+/* USER CODE END Header_StartDefaultTask */
+void StartDefaultTask(void *argument)
+{
+  /* USER CODE BEGIN 5 */
+	uint32_t notVal;
+  /* Infinite loop */
+  for(;;)
+  {
+    xTaskNotifyWait(0, 0, notVal, osWaitForever);
+
+  }
+  /* USER CODE END 5 */
+}
+
+/* USER CODE BEGIN Header_PidRunner_Entry */
+/**
+* @brief Function implementing the PIDTask thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_PidRunner_Entry */
+void PidRunner_Entry(void *argument)
+{
+  /* USER CODE BEGIN PidRunner_Entry */
+  /* Infinite loop */
+  for(;;)
+  {
+	  cyclespeed++;
+	  	samples = 0;
+
+	  	if(control_loop == 1){
+	  		current_regulator.reference = ref_ramp * 2048.0;
+	  	}
+
+	  	if(cyclespeed == 10){
+	  		if(ref_normalized - ref_ramp > RAMP_STEP) ref_ramp += RAMP_STEP;
+	  		else if(ref_normalized - ref_ramp < -RAMP_STEP) ref_ramp -= RAMP_STEP;
+	  		else ref_ramp = ref_normalized;
+	  		cyclespeed = 0;
+	  		speed_raw = htim3.Instance->CNT - position_diff;
+	  		position_diff = htim3.Instance->CNT;
+	  		speed = ((float)speed_raw)/8000.0 * 6000.0;
+	  		speed_regulator.input_raw = speed;
+	  		if(!ref_ramp) HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_RESET);
+	  		else{
+	  			if(!speed_raw){
+	  				HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_SET);
+	  				current_regulator.I = 0.0;
+	  				speed_regulator.I = 0.0;
+	  			}
+	  		}
+	  		if(control_loop == 2){
+	  			speed_regulator.reference = ref_ramp * MAX_SPEED;
+	  			current_regulator.reference = speed_regulator.output;
+	  		}
+	  		PID_Controller(&speed_regulator);
+	  	}
+
+	  	PID_Controller(&current_regulator);
+
+	  	if(control_loop){
+	  		TIM1 -> CCR1 = (uint32_t)current_regulator.output;
+	  	}else{
+	  		TIM1 -> CCR1 = (uint32_t)(7200.0 + ref_ramp * 6480.0);
+	  	}
+
+	  	if((control_loop == 0) && (last_control_loop != control_loop)){
+	  		PID_TurnOff(&speed_regulator);
+	  		PID_TurnOff(&current_regulator);
+	  	}else if((control_loop == 1) && (control_loop != last_control_loop)){
+	  		PID_TurnOn(&current_regulator);
+	  		PID_TurnOff(&speed_regulator);
+	  	}else if((control_loop == 2) && (last_control_loop != control_loop)){
+	  		PID_TurnOn(&speed_regulator);
+	  		PID_TurnOn(&current_regulator);
+	  	}
+	  	last_control_loop = control_loop;
+	  	osDelay(1);
+  }
+  /* USER CODE END PidRunner_Entry */
+}
+
+/**
+  * @brief  Period elapsed callback in non blocking mode
+  * @note   This function is called  when TIM17 interrupt took place, inside
+  * HAL_TIM_IRQHandler(). It makes a direct call to HAL_IncTick() to increment
+  * a global variable "uwTick" used as application time base.
+  * @param  htim : TIM handle
+  * @retval None
+  */
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+{
+  /* USER CODE BEGIN Callback 0 */
+
+  /* USER CODE END Callback 0 */
+  if (htim->Instance == TIM17) {
+    HAL_IncTick();
+  }
+  /* USER CODE BEGIN Callback 1 */
+
+  /* USER CODE END Callback 1 */
+}
 
 /**
   * @brief  This function is executed in case of error occurrence.

@@ -29,7 +29,7 @@
   *
   * @retval None
   */
-void PID_Init (PID_Data *pid,
+void PID_Init (PID_t *pid,
 				float P, float I, float Kb, float Ts,
 				float deadzone, float min, float max,
 				float output_offset, float input_offset){
@@ -44,7 +44,7 @@ void PID_Init (PID_Data *pid,
 	pid -> error_deadzone = deadzone;
 }
 
-void PID_Controller (PID_Data *pid){
+void PID_Controller (PID_t *pid){
 	pid->input = pid->input_raw - pid->input_offset;
 	if(pid->run){
 		//Obliczenie uchybu sterowania
@@ -77,11 +77,11 @@ void PID_Controller (PID_Data *pid){
 	pid->last_error = pid->error_dz;
 }
 
-void PID_TurnOn (PID_Data *pid){
+void PID_TurnOn (PID_t *pid){
 	pid->run = 1;
 }
 
-void PID_TurnOff (PID_Data *pid){
+void PID_TurnOff (PID_t *pid){
 	pid->I = 0;
 	pid->antiwindup_correction = 0;
 	pid->error = 0;
@@ -93,6 +93,14 @@ void PID_TurnOff (PID_Data *pid){
 	pid->run = 0;
 }
 
-uint8_t PID_Running (PID_Data *pid){
+uint8_t PID_Running (PID_t *pid){
 	return pid->run;
+}
+
+void PID_Input(PID_t *pid, float in){
+	pid -> input_raw = in;
+}
+
+float PID_Out(PID_t* pid){
+	return pid -> output;
 }

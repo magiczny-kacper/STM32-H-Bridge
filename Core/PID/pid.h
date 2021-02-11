@@ -38,14 +38,14 @@ typedef struct {
 	float error_deadzone;			// Martwa strefa uchybu
 	float antiwindup_correction;	// Korekcja antywindup
 	float output_offset;			// Przesunięcie zera wyjścia regulatora
-} PID_Data;
+} PID_t;
 
-void PID_Init (PID_Data *pid, float P, float I, float Kb, float Ts, float deadzone, float min, float max, float output_offset, float input_offset);
+void PID_Init (PID_t *pid, float P, float I, float Kb, float Ts, float deadzone, float min, float max, float output_offset, float input_offset);
 
-void PID_Controller (PID_Data *pid);
+void PID_Controller (PID_t *pid);
 
-void PID_TurnOn (PID_Data *pid);
+void PID_TurnOn (PID_t *pid);
 
-void PID_TurnOff (PID_Data *pid);
+void PID_TurnOff (PID_t *pid);
 
-uint8_t PID_Running (PID_Data *pid);
+uint8_t PID_Running (PID_t *pid);

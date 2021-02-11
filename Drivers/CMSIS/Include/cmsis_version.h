@@ -36,5 +36,4 @@
 #define __CM_CMSIS_VERSION_SUB   ( 1U)                                      /*!< [15:0]  CMSIS Core(M) sub version */
 #define __CM_CMSIS_VERSION       ((__CM_CMSIS_VERSION_MAIN << 16U) | \
                                    __CM_CMSIS_VERSION_SUB           )       /*!< CMSIS Core(M) version number */
-#define __FPU_PRESENT 1
 #endif
